@@ -24,6 +24,14 @@ This is a throughput benchmark, not a full convergence run. Each model/dataset
 pair runs a few warmup batches and then a fixed number of measured training
 batches. Use the same batch count on every device for fair comparison.
 
+The CSV also estimates:
+
+- `estimated_epoch_seconds`
+- `estimated_100_epoch_hours`
+
+These estimates help decide which model/dataset pair is large enough to justify
+distributed training before spending hours on full local training.
+
 ## Windows
 
 Setup:

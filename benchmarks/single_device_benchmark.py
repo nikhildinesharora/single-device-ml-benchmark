@@ -35,12 +35,15 @@ class BenchmarkResult:
     classes: int
     image_size: int
     batch_size: int
+    dataset_samples: int
     measured_batches: int
     warmup_batches: int
     samples: int
     seconds: float
     samples_per_second: float
     seconds_per_batch: float
+    estimated_epoch_seconds: float
+    estimated_100_epoch_hours: float
     loss: float
     amp: bool
 
@@ -165,6 +168,7 @@ def run_one(
     amp: bool,
 ) -> BenchmarkResult:
     dataset, classes = load_dataset(dataset_name, data_dir, download=download, max_samples=max_samples)
+    dataset_samples = len(dataset)
     loader = DataLoader(
         dataset,
         batch_size=batch_size,
@@ -228,19 +232,25 @@ def run_one(
         classes=classes,
         image_size=IMAGE_SIZE,
         batch_size=batch_size,
+        dataset_samples=dataset_samples,
         measured_batches=measured,
         warmup_batches=warmup_batches,
         samples=total_samples,
         seconds=seconds,
         samples_per_second=total_samples / seconds,
         seconds_per_batch=seconds / max(1, measured),
+        estimated_epoch_seconds=dataset_samples / max(total_samples / seconds, 1e-9),
+        estimated_100_epoch_hours=(dataset_samples / max(total_samples / seconds, 1e-9)) * 100 / 3600,
         loss=total_loss / max(1, total_samples),
         amp=amp,
     )
     print(
         f"[bench] done {dataset_name}/{model_name}: "
         f"{result.samples_per_second:.2f} samples/s, "
-        f"{result.seconds_per_batch:.3f}s/batch, loss={result.loss:.4f}"
+        f"{result.seconds_per_batch:.3f}s/batch, "
+        f"est_epoch={result.estimated_epoch_seconds / 60:.1f}min, "
+        f"est_100ep={result.estimated_100_epoch_hours:.1f}h, "
+        f"loss={result.loss:.4f}"
     )
     write_result_files(result, output_dir)
     return result
