@@ -9,9 +9,7 @@ import shutil
 import subprocess
 import sys
 
-TORCH_VERSION = "2.10.0"
-TORCHVISION_VERSION = "0.25.0"
-PACKAGES = [f"torch=={TORCH_VERSION}", f"torchvision=={TORCHVISION_VERSION}"]
+PACKAGES = ["torch", "torchvision"]
 
 
 def _run_text(command: list[str]) -> str:
@@ -49,7 +47,7 @@ def _cuda_index_url(cuda_version: tuple[int, int] | None) -> str | None:
 
 def selected_install_command() -> tuple[list[str], str]:
     system = platform.system()
-    command = [sys.executable, "-m", "pip", "install", *PACKAGES]
+    command = [sys.executable, "-m", "pip", "install", "--upgrade", *PACKAGES]
 
     if system == "Darwin":
         return command, "macOS default PyPI wheels with MPS support"

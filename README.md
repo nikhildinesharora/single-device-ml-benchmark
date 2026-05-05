@@ -20,6 +20,10 @@ runs/single_device/single_device_results.csv
 runs/single_device/*.json
 ```
 
+This is a throughput benchmark, not a full convergence run. Each model/dataset
+pair runs a few warmup batches and then a fixed number of measured training
+batches. Use the same batch count on every device for fair comparison.
+
 ## Windows
 
 Setup:
@@ -38,6 +42,12 @@ Full benchmark:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run_single_device_benchmarks.ps1 -Model "resnet50,resnet101,vit_b_16" -Dataset "cifar100,tiny-imagenet-200" -BatchSize 8 -Batches 20 -Download
+```
+
+Longer benchmark:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run_single_device_benchmarks.ps1 -Model "resnet50,resnet101,vit_b_16" -Dataset "cifar100,tiny-imagenet-200" -BatchSize 8 -Batches 100 -Download
 ```
 
 ## macOS
@@ -61,10 +71,16 @@ Full benchmark:
 DOWNLOAD=1 MODEL="resnet50,resnet101,vit_b_16" DATASET="cifar100,tiny-imagenet-200" BATCH_SIZE=8 BATCHES=20 ./run_single_device_benchmarks.sh
 ```
 
+Longer benchmark:
+
+```bash
+DOWNLOAD=1 MODEL="resnet50,resnet101,vit_b_16" DATASET="cifar100,tiny-imagenet-200" BATCH_SIZE=8 BATCHES=100 ./run_single_device_benchmarks.sh
+```
+
 ## Notes
 
 - If a model runs out of memory, reduce `BatchSize` to `4`, `2`, or `1`.
 - Use the same `BatchSize`, `Batches`, and model/dataset list on every device for fair comparison.
+- `Batches` controls measured training batches per combination. It is not an epoch count.
 - Tiny ImageNet is downloaded from Stanford's CS231n public dataset URL.
 - Send back `runs/single_device/single_device_results.csv` after the run.
-
