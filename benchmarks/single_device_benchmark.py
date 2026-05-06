@@ -12,8 +12,9 @@ import time
 import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
+from math import ceil
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import torch
 from torch import nn
@@ -24,6 +25,27 @@ TINY_IMAGENET_URL = "http://cs231n.stanford.edu/tiny-imagenet-200.zip"
 IMAGE_SIZE = 224
 MODEL_CHOICES = ("resnet50", "resnet101", "vit_b_16")
 DATASET_CHOICES = ("cifar100", "tiny-imagenet-200")
+DEFAULT_CONFIG: dict[str, Any] = {
+    "model": "all",
+    "dataset": "all",
+    "data_dir": ".data",
+    "output_dir": "runs/single_device",
+    "device": "auto",
+    "batch_size": 8,
+    "batches": 20,
+    "epochs": 0,
+    "batches_per_epoch": 0,
+    "warmup_batches": 3,
+    "log_every": 100,
+    "power_sample_interval": 2.0,
+    "max_samples": 0,
+    "num_workers": 0,
+    "lr": 0.01,
+    "momentum": 0.9,
+    "weight_decay": 0.0,
+    "download": False,
+    "amp": False,
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +62,11 @@ class BenchmarkResult:
     classes: int
     image_size: int
     batch_size: int
+    epochs: int
+    batches_per_epoch: int
+    lr: float
+    momentum: float
+    weight_decay: float
     dataset_samples: int
     measured_batches: int
     warmup_batches: int
@@ -72,6 +99,8 @@ class ProgressRow:
     model: str
     dataset: str
     batch_size: int
+    epoch: int
+    epoch_batch: int
     measured_batch: int
     samples: int
     interval_seconds: float
@@ -261,7 +290,12 @@ def run_one(
     device: torch.device,
     batch_size: int,
     batches: int,
+    epochs: int,
+    batches_per_epoch: int,
     warmup_batches: int,
+    lr: float,
+    momentum: float,
+    weight_decay: float,
     max_samples: int,
     num_workers: int,
     download: bool,
@@ -281,8 +315,23 @@ def run_one(
     )
     model = build_model(model_name, classes).to(device)
     model.train()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=lr,
+        momentum=momentum,
+        weight_decay=weight_decay,
+    )
     criterion = nn.CrossEntropyLoss()
+    measured_batches = (
+        max(1, epochs) * max(1, batches_per_epoch)
+        if epochs > 0 and batches_per_epoch > 0
+        else batches
+    )
+    effective_batches_per_epoch = (
+        max(1, batches_per_epoch)
+        if epochs > 0 and batches_per_epoch > 0
+        else max(1, batches)
+    )
 
     run_id = (
         f"{time.strftime('%Y%m%d-%H%M%S')}-"
@@ -290,7 +339,9 @@ def run_one(
     ).replace("/", "-").replace("\\", "-")
     print(
         f"[bench] {dataset_name}/{model_name}: "
-        f"device={device}, batch={batch_size}, warmup={warmup_batches}, measured={batches}"
+        f"device={device}, batch={batch_size}, warmup={warmup_batches}, "
+        f"measured={measured_batches}, epochs={epochs}, "
+        f"batches/epoch={batches_per_epoch}, lr={lr}"
     )
     total_loss = 0.0
     total_samples = 0
@@ -303,7 +354,7 @@ def run_one(
     power = PowerSampler(device, power_sample_interval)
 
     iterator = iter(loader)
-    target_steps = warmup_batches + batches
+    target_steps = warmup_batches + measured_batches
     for step in range(target_steps):
         try:
             images, labels = next(iterator)
@@ -336,7 +387,9 @@ def run_one(
             interval_loss += batch_loss * batch_samples
             final_batch_loss = batch_loss
             measured += 1
-            if log_every > 0 and (measured % log_every == 0 or measured == batches):
+            current_epoch = ceil(measured / effective_batches_per_epoch)
+            current_epoch_batch = ((measured - 1) % effective_batches_per_epoch) + 1
+            if log_every > 0 and (measured % log_every == 0 or measured == measured_batches):
                 synchronize_device(device)
                 now = time.perf_counter()
                 interval_seconds = max(now - interval_started, 1e-9)
@@ -350,6 +403,8 @@ def run_one(
                     model=model_name,
                     dataset=dataset_name,
                     batch_size=batch_size,
+                    epoch=current_epoch,
+                    epoch_batch=current_epoch_batch,
                     measured_batch=measured,
                     samples=total_samples,
                     interval_seconds=interval_seconds,
@@ -366,7 +421,8 @@ def run_one(
                 write_progress_row(progress, output_dir)
                 print(
                     f"[bench] progress {dataset_name}/{model_name}: "
-                    f"batch={measured}/{batches}, "
+                    f"batch={measured}/{measured_batches}, "
+                    f"epoch={current_epoch}, "
                     f"throughput={progress.cumulative_samples_per_second:.2f} samples/s, "
                     f"loss={progress.cumulative_loss:.4f}"
                 )
@@ -392,6 +448,11 @@ def run_one(
         classes=classes,
         image_size=IMAGE_SIZE,
         batch_size=batch_size,
+        epochs=epochs,
+        batches_per_epoch=batches_per_epoch,
+        lr=lr,
+        momentum=momentum,
+        weight_decay=weight_decay,
         dataset_samples=dataset_samples,
         measured_batches=measured,
         warmup_batches=warmup_batches,
@@ -461,36 +522,70 @@ def write_progress_row(progress: ProgressRow, output_dir: Path) -> None:
 
 
 def expand_choice(value: str, choices: Iterable[str]) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
     if value == "all":
         return list(choices)
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def load_config(path: str) -> dict[str, Any]:
+    if not path:
+        return {}
+    config_path = Path(path).resolve()
+    try:
+        with config_path.open("r", encoding="utf-8") as handle:
+            config = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid JSON config {config_path}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise SystemExit(f"config must be a JSON object: {config_path}")
+    return config
+
+
+def merged_config(args: argparse.Namespace) -> dict[str, Any]:
+    config = dict(DEFAULT_CONFIG)
+    config.update(load_config(args.config))
+    for key, value in vars(args).items():
+        if key == "config":
+            continue
+        if value is not None:
+            config[key] = value
+    return config
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Single-device training benchmark for model/dataset combinations."
     )
-    parser.add_argument("--model", default="all", help="all, or comma-list: resnet50,resnet101,vit_b_16")
-    parser.add_argument("--dataset", default="all", help="all, or comma-list: cifar100,tiny-imagenet-200")
-    parser.add_argument("--data-dir", default=".data")
-    parser.add_argument("--output-dir", default="runs/single_device")
-    parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, or mps")
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--batches", type=int, default=20)
-    parser.add_argument("--warmup-batches", type=int, default=3)
-    parser.add_argument("--log-every", type=int, default=100, help="Write progress every N measured batches; 0 disables.")
-    parser.add_argument("--power-sample-interval", type=float, default=2.0)
-    parser.add_argument("--max-samples", type=int, default=0, help="Limit dataset samples; 0 uses all.")
-    parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--download", action="store_true", help="Download missing datasets.")
-    parser.add_argument("--amp", action="store_true", help="Use autocast mixed precision on CUDA/MPS.")
+    parser.add_argument("--config", default="", help="Path to a JSON benchmark config.")
+    parser.add_argument("--model", default=None, help="all, or comma-list: resnet50,resnet101,vit_b_16")
+    parser.add_argument("--dataset", default=None, help="all, or comma-list: cifar100,tiny-imagenet-200")
+    parser.add_argument("--data-dir", default=None)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--device", default=None, help="auto, cpu, cuda, cuda:0, or mps")
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--batches", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batches-per-epoch", type=int, default=None)
+    parser.add_argument("--warmup-batches", type=int, default=None)
+    parser.add_argument("--log-every", type=int, default=None, help="Write progress every N measured batches; 0 disables.")
+    parser.add_argument("--power-sample-interval", type=float, default=None)
+    parser.add_argument("--max-samples", type=int, default=None, help="Limit dataset samples; 0 uses all.")
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--momentum", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--download", action=argparse.BooleanOptionalAction, default=None, help="Download missing datasets.")
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None, help="Use autocast mixed precision on CUDA/MPS.")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    models_to_run = expand_choice(args.model, MODEL_CHOICES)
-    datasets_to_run = expand_choice(args.dataset, DATASET_CHOICES)
+    config = merged_config(args)
+    models_to_run = expand_choice(config["model"], MODEL_CHOICES)
+    datasets_to_run = expand_choice(config["dataset"], DATASET_CHOICES)
 
     unknown_models = sorted(set(models_to_run) - set(MODEL_CHOICES))
     unknown_datasets = sorted(set(datasets_to_run) - set(DATASET_CHOICES))
@@ -499,11 +594,12 @@ def main() -> None:
     if unknown_datasets:
         raise SystemExit(f"unknown dataset(s): {', '.join(unknown_datasets)}")
 
-    device = choose_device(args.device)
-    data_dir = Path(args.data_dir).resolve()
-    output_dir = Path(args.output_dir).resolve()
+    device = choose_device(str(config["device"]))
+    data_dir = Path(str(config["data_dir"])).resolve()
+    output_dir = Path(str(config["output_dir"])).resolve()
     print(f"[bench] host={socket.gethostname()} os={platform.system()} machine={platform.machine()}")
     print(f"[bench] torch={torch.__version__} device={device}")
+    print("[bench] config:", json.dumps(config, sort_keys=True))
 
     for dataset_name in datasets_to_run:
         for model_name in models_to_run:
@@ -513,15 +609,20 @@ def main() -> None:
                 data_dir=data_dir,
                 output_dir=output_dir,
                 device=device,
-                batch_size=max(1, args.batch_size),
-                batches=max(1, args.batches),
-                warmup_batches=max(0, args.warmup_batches),
-                max_samples=max(0, args.max_samples),
-                num_workers=max(0, args.num_workers),
-                download=args.download,
-                amp=args.amp,
-                log_every=max(0, args.log_every),
-                power_sample_interval=max(0.25, args.power_sample_interval),
+                batch_size=max(1, int(config["batch_size"])),
+                batches=max(1, int(config["batches"])),
+                epochs=max(0, int(config["epochs"])),
+                batches_per_epoch=max(0, int(config["batches_per_epoch"])),
+                warmup_batches=max(0, int(config["warmup_batches"])),
+                lr=float(config["lr"]),
+                momentum=float(config["momentum"]),
+                weight_decay=float(config["weight_decay"]),
+                max_samples=max(0, int(config["max_samples"])),
+                num_workers=max(0, int(config["num_workers"])),
+                download=bool(config["download"]),
+                amp=bool(config["amp"]),
+                log_every=max(0, int(config["log_every"])),
+                power_sample_interval=max(0.25, float(config["power_sample_interval"])),
             )
 
 
