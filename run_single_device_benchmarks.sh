@@ -15,6 +15,8 @@ fi
   --batch-size "${BATCH_SIZE:-16}" \
   --batches "${BATCHES:-20}" \
   --warmup-batches "${WARMUP_BATCHES:-3}" \
+  --log-every "${LOG_EVERY:-100}" \
+  --power-sample-interval "${POWER_SAMPLE_INTERVAL:-2.0}" \
   --max-samples "${MAX_SAMPLES:-0}" \
   --num-workers "${NUM_WORKERS:-0}" \
   --device "${DEVICE:-auto}" \

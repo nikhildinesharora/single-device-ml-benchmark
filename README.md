@@ -17,6 +17,7 @@ Results are saved to:
 
 ```text
 runs/single_device/single_device_results.csv
+runs/single_device/single_device_progress.csv
 runs/single_device/*.json
 ```
 
@@ -31,6 +32,10 @@ The CSV also estimates:
 
 These estimates help decide which model/dataset pair is large enough to justify
 distributed training before spending hours on full local training.
+
+`single_device_results.csv` is the final per-run summary. `single_device_progress.csv`
+contains intermediate rows every `LogEvery` / `LOG_EVERY` measured batches so you
+can inspect loss and throughput trends during the run.
 
 ## Windows
 
@@ -49,13 +54,13 @@ powershell -ExecutionPolicy Bypass -File .\run_single_device_benchmarks.ps1 -Mod
 Full benchmark:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run_single_device_benchmarks.ps1 -Model "resnet50,resnet101,vit_b_16" -Dataset "cifar100,tiny-imagenet-200" -BatchSize 8 -Batches 20 -Download
+powershell -ExecutionPolicy Bypass -File .\run_single_device_benchmarks.ps1 -Model "resnet50,resnet101,vit_b_16" -Dataset "cifar100,tiny-imagenet-200" -BatchSize 8 -Batches 20 -LogEvery 5 -Download
 ```
 
 Longer benchmark:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run_single_device_benchmarks.ps1 -Model "resnet50,resnet101,vit_b_16" -Dataset "cifar100,tiny-imagenet-200" -BatchSize 8 -Batches 100 -Download
+powershell -ExecutionPolicy Bypass -File .\run_single_device_benchmarks.ps1 -Model "resnet50,resnet101,vit_b_16" -Dataset "cifar100,tiny-imagenet-200" -BatchSize 8 -Batches 100 -LogEvery 10 -Download
 ```
 
 ## macOS
@@ -76,13 +81,13 @@ DOWNLOAD=1 MODEL="resnet50" DATASET="cifar100" BATCH_SIZE=4 BATCHES=5 ./run_sing
 Full benchmark:
 
 ```bash
-DOWNLOAD=1 MODEL="resnet50,resnet101,vit_b_16" DATASET="cifar100,tiny-imagenet-200" BATCH_SIZE=8 BATCHES=20 ./run_single_device_benchmarks.sh
+DOWNLOAD=1 MODEL="resnet50,resnet101,vit_b_16" DATASET="cifar100,tiny-imagenet-200" BATCH_SIZE=8 BATCHES=20 LOG_EVERY=5 ./run_single_device_benchmarks.sh
 ```
 
 Longer benchmark:
 
 ```bash
-DOWNLOAD=1 MODEL="resnet50,resnet101,vit_b_16" DATASET="cifar100,tiny-imagenet-200" BATCH_SIZE=8 BATCHES=100 ./run_single_device_benchmarks.sh
+DOWNLOAD=1 MODEL="resnet50,resnet101,vit_b_16" DATASET="cifar100,tiny-imagenet-200" BATCH_SIZE=8 BATCHES=100 LOG_EVERY=10 ./run_single_device_benchmarks.sh
 ```
 
 ## Notes
@@ -90,5 +95,7 @@ DOWNLOAD=1 MODEL="resnet50,resnet101,vit_b_16" DATASET="cifar100,tiny-imagenet-2
 - If a model runs out of memory, reduce `BatchSize` to `4`, `2`, or `1`.
 - Use the same `BatchSize`, `Batches`, and model/dataset list on every device for fair comparison.
 - `Batches` controls measured training batches per combination. It is not an epoch count.
+- `LogEvery` / `LOG_EVERY` controls intermediate progress logging.
+- Power is best-effort. NVIDIA CUDA devices use `nvidia-smi`; Apple MPS/CPU power is recorded as unavailable unless OS-level tooling is added.
 - Tiny ImageNet is downloaded from Stanford's CS231n public dataset URL.
 - Send back `runs/single_device/single_device_results.csv` after the run.

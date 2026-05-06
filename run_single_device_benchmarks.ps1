@@ -4,6 +4,8 @@ param(
     [int]$BatchSize = 16,
     [int]$Batches = 20,
     [int]$WarmupBatches = 3,
+    [int]$LogEvery = 100,
+    [double]$PowerSampleInterval = 2.0,
     [int]$MaxSamples = 0,
     [int]$NumWorkers = 0,
     [string]$Device = "auto",
@@ -27,6 +29,8 @@ $ArgsList = @(
     "--batch-size", "$BatchSize",
     "--batches", "$Batches",
     "--warmup-batches", "$WarmupBatches",
+    "--log-every", "$LogEvery",
+    "--power-sample-interval", "$PowerSampleInterval",
     "--max-samples", "$MaxSamples",
     "--num-workers", "$NumWorkers",
     "--device", $Device

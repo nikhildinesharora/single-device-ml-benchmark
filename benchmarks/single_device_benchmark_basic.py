@@ -6,8 +6,6 @@ import json
 import platform
 import shutil
 import socket
-import subprocess
-import threading
 import time
 import urllib.request
 import zipfile
@@ -28,13 +26,10 @@ DATASET_CHOICES = ("cifar100", "tiny-imagenet-200")
 
 @dataclass(frozen=True)
 class BenchmarkResult:
-    run_id: str
     hostname: str
     os: str
     machine: str
     device: str
-    world_size: int
-    participant_count: int
     model: str
     dataset: str
     classes: int
@@ -46,44 +41,11 @@ class BenchmarkResult:
     samples: int
     seconds: float
     samples_per_second: float
-    throughput: float
     seconds_per_batch: float
-    speedup: float
-    efficiency: float
-    worker_score: float
-    worker_scores: str
     estimated_epoch_seconds: float
     estimated_100_epoch_hours: float
     loss: float
-    final_batch_loss: float
-    avg_power_watts: float | None
-    max_power_watts: float | None
-    energy_joules: float | None
-    power_source: str
     amp: bool
-
-
-@dataclass(frozen=True)
-class ProgressRow:
-    run_id: str
-    hostname: str
-    device: str
-    world_size: int
-    model: str
-    dataset: str
-    batch_size: int
-    measured_batch: int
-    samples: int
-    interval_seconds: float
-    total_seconds: float
-    interval_samples_per_second: float
-    cumulative_samples_per_second: float
-    interval_loss: float
-    cumulative_loss: float
-    avg_power_watts: float | None
-    max_power_watts: float | None
-    energy_joules: float | None
-    power_source: str
 
 
 def choose_device(requested: str) -> torch.device:
@@ -105,68 +67,6 @@ def synchronize_device(device: torch.device) -> None:
         mps = getattr(torch, "mps", None)
         if mps is not None and hasattr(mps, "synchronize"):
             torch.mps.synchronize()
-
-
-class PowerSampler:
-    def __init__(self, device: torch.device, interval_seconds: float) -> None:
-        self.device = device
-        self.interval_seconds = max(0.25, interval_seconds)
-        self.values: list[float] = []
-        self.source = "not_available"
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        if self.device.type == "cuda" and shutil.which("nvidia-smi"):
-            self.source = "nvidia-smi"
-            self._thread = threading.Thread(target=self._run_nvidia, daemon=True)
-            self._thread.start()
-        elif self.device.type == "mps":
-            self.source = "not_available_mps"
-        elif self.device.type == "cpu":
-            self.source = "not_available_cpu"
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-
-    def stats(self, seconds: float) -> tuple[float | None, float | None, float | None, str]:
-        if not self.values:
-            return None, None, None, self.source
-        avg_power = sum(self.values) / len(self.values)
-        return avg_power, max(self.values), avg_power * max(0.0, seconds), self.source
-
-    def _run_nvidia(self) -> None:
-        while not self._stop.is_set():
-            value = self._read_nvidia_power()
-            if value is not None:
-                self.values.append(value)
-            self._stop.wait(self.interval_seconds)
-
-    @staticmethod
-    def _read_nvidia_power() -> float | None:
-        try:
-            result = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=power.draw",
-                    "--format=csv,noheader,nounits",
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        if result.returncode != 0:
-            return None
-        line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-        try:
-            return float(line.strip())
-        except ValueError:
-            return None
 
 
 def train_transform() -> transforms.Compose:
@@ -266,8 +166,6 @@ def run_one(
     num_workers: int,
     download: bool,
     amp: bool,
-    log_every: int,
-    power_sample_interval: float,
 ) -> BenchmarkResult:
     dataset, classes = load_dataset(dataset_name, data_dir, download=download, max_samples=max_samples)
     dataset_samples = len(dataset)
@@ -284,10 +182,6 @@ def run_one(
     optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
     criterion = nn.CrossEntropyLoss()
 
-    run_id = (
-        f"{time.strftime('%Y%m%d-%H%M%S')}-"
-        f"{socket.gethostname()}-{dataset_name}-{model_name}"
-    ).replace("/", "-").replace("\\", "-")
     print(
         f"[bench] {dataset_name}/{model_name}: "
         f"device={device}, batch={batch_size}, warmup={warmup_batches}, measured={batches}"
@@ -296,11 +190,6 @@ def run_one(
     total_samples = 0
     measured = 0
     started = 0.0
-    final_batch_loss = 0.0
-    interval_loss = 0.0
-    interval_samples = 0
-    interval_started = 0.0
-    power = PowerSampler(device, power_sample_interval)
 
     iterator = iter(loader)
     target_steps = warmup_batches + batches
@@ -316,9 +205,7 @@ def run_one(
 
         if step == warmup_batches:
             synchronize_device(device)
-            power.start()
             started = time.perf_counter()
-            interval_started = started
 
         optimizer.zero_grad(set_to_none=True)
         with autocast_context(device, amp):
@@ -329,64 +216,17 @@ def run_one(
 
         if step >= warmup_batches:
             batch_samples = int(images.shape[0])
-            batch_loss = float(loss.detach().cpu())
             total_samples += batch_samples
-            total_loss += batch_loss * batch_samples
-            interval_samples += batch_samples
-            interval_loss += batch_loss * batch_samples
-            final_batch_loss = batch_loss
+            total_loss += float(loss.detach().cpu()) * batch_samples
             measured += 1
-            if log_every > 0 and (measured % log_every == 0 or measured == batches):
-                synchronize_device(device)
-                now = time.perf_counter()
-                interval_seconds = max(now - interval_started, 1e-9)
-                total_seconds = max(now - started, 1e-9)
-                avg_power, max_power, energy, source = power.stats(total_seconds)
-                progress = ProgressRow(
-                    run_id=run_id,
-                    hostname=socket.gethostname(),
-                    device=str(device),
-                    world_size=1,
-                    model=model_name,
-                    dataset=dataset_name,
-                    batch_size=batch_size,
-                    measured_batch=measured,
-                    samples=total_samples,
-                    interval_seconds=interval_seconds,
-                    total_seconds=total_seconds,
-                    interval_samples_per_second=interval_samples / interval_seconds,
-                    cumulative_samples_per_second=total_samples / total_seconds,
-                    interval_loss=interval_loss / max(1, interval_samples),
-                    cumulative_loss=total_loss / max(1, total_samples),
-                    avg_power_watts=avg_power,
-                    max_power_watts=max_power,
-                    energy_joules=energy,
-                    power_source=source,
-                )
-                write_progress_row(progress, output_dir)
-                print(
-                    f"[bench] progress {dataset_name}/{model_name}: "
-                    f"batch={measured}/{batches}, "
-                    f"throughput={progress.cumulative_samples_per_second:.2f} samples/s, "
-                    f"loss={progress.cumulative_loss:.4f}"
-                )
-                interval_started = now
-                interval_loss = 0.0
-                interval_samples = 0
 
     synchronize_device(device)
-    power.stop()
     seconds = max(time.perf_counter() - started, 1e-9)
-    avg_power, max_power, energy, source = power.stats(seconds)
-    throughput = total_samples / seconds
     result = BenchmarkResult(
-        run_id=run_id,
         hostname=socket.gethostname(),
         os=platform.system() or "Unknown",
         machine=platform.machine() or "unknown",
         device=str(device),
-        world_size=1,
-        participant_count=1,
         model=model_name,
         dataset=dataset_name,
         classes=classes,
@@ -397,21 +237,11 @@ def run_one(
         warmup_batches=warmup_batches,
         samples=total_samples,
         seconds=seconds,
-        samples_per_second=throughput,
-        throughput=throughput,
+        samples_per_second=total_samples / seconds,
         seconds_per_batch=seconds / max(1, measured),
-        speedup=1.0,
-        efficiency=1.0,
-        worker_score=throughput,
-        worker_scores=json.dumps({socket.gethostname(): throughput}, sort_keys=True),
         estimated_epoch_seconds=dataset_samples / max(total_samples / seconds, 1e-9),
         estimated_100_epoch_hours=(dataset_samples / max(total_samples / seconds, 1e-9)) * 100 / 3600,
         loss=total_loss / max(1, total_samples),
-        final_batch_loss=final_batch_loss,
-        avg_power_watts=avg_power,
-        max_power_watts=max_power,
-        energy_joules=energy,
-        power_source=source,
         amp=amp,
     )
     print(
@@ -448,18 +278,6 @@ def write_result_files(result: BenchmarkResult, output_dir: Path) -> None:
     print(f"[bench] appended {csv_path}")
 
 
-def write_progress_row(progress: ProgressRow, output_dir: Path) -> None:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "single_device_progress.csv"
-    row = asdict(progress)
-    needs_header = not csv_path.exists()
-    with csv_path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
-        if needs_header:
-            writer.writeheader()
-        writer.writerow(row)
-
-
 def expand_choice(value: str, choices: Iterable[str]) -> list[str]:
     if value == "all":
         return list(choices)
@@ -478,8 +296,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--batches", type=int, default=20)
     parser.add_argument("--warmup-batches", type=int, default=3)
-    parser.add_argument("--log-every", type=int, default=100, help="Write progress every N measured batches; 0 disables.")
-    parser.add_argument("--power-sample-interval", type=float, default=2.0)
     parser.add_argument("--max-samples", type=int, default=0, help="Limit dataset samples; 0 uses all.")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--download", action="store_true", help="Download missing datasets.")
@@ -520,8 +336,6 @@ def main() -> None:
                 num_workers=max(0, args.num_workers),
                 download=args.download,
                 amp=args.amp,
-                log_every=max(0, args.log_every),
-                power_sample_interval=max(0.25, args.power_sample_interval),
             )
 
 
